@@ -1,0 +1,411 @@
+type Query {
+  getProject(id: ID!): Project
+  listProjects(filter: ProjectFilter): ProjectConnection
+  getAgentStatus(projectId: ID!, agentId: String!): AgentStatus
+  getConversationHistory(projectId: ID!): [ConversationMessage]
+  listAgentConfigs: [AgentConfig]
+  getAgentConfig(agentId: String!): AgentConfig
+  listToolConfigs: [ToolConfig]
+  getToolConfig(toolId: String!): ToolConfig
+  listUsers: [User]
+  getUser(userId: String!): User
+  getCurrentUserProfile: User
+  listAvailableRoles: [String]
+  listOrganizations: [Organization]
+  getAssessmentProgress(sessionId: String!): [AssessmentDimensionProgress]
+  generateReportDownloadUrl(projectId: ID!): ReportDownloadUrl
+}
+
+type Mutation {
+  createProject(input: CreateProjectInput!): Project
+  updateProject(id: ID!, input: UpdateProjectInput!): Project
+  sendMessageToAgent(
+    projectId: ID!
+    agentId: String!
+    message: String!
+  ): ConversationMessage
+  uploadDocument(projectId: ID!, file: S3Object!): DocumentUploadResult
+  updateAgentStatus(
+    projectId: ID!
+    agentId: String!
+    status: AgentStatusInput!
+  ): AgentStatus
+  updateProjectProgress(
+    projectId: ID!
+    progress: ProjectProgressInput!
+  ): ProjectProgress
+  sendMessage(
+    projectId: ID!
+    message: ConversationMessageInput!
+  ): ConversationMessage
+  publishConversationMessage(input: PublishMessageInput!): ConversationMessage
+    @aws_iam
+  generateDocumentUploadUrl(input: GenerateUploadUrlInput!): DocumentUploadUrl
+  updateAgentConfig(input: UpdateAgentConfigInput!): AgentConfig
+  createAgentConfig(input: CreateAgentConfigInput!): AgentConfig
+  deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
+  updateToolConfig(input: UpdateToolConfigInput!): ToolConfig
+  createToolConfig(input: CreateToolConfigInput!): ToolConfig
+  deleteToolConfig(toolId: String!): DeleteToolConfigResult
+  requestAgentCreation(input: CreateAgentRequestInput!): AgentCreationResponse
+  submitTask(input: SubmitTaskInput!): TaskSubmissionResponse
+  assignUserRole(input: AssignUserRoleInput!): UserManagementResponse
+  removeUserRole(userId: String!, role: String!): UserManagementResponse
+  publishAssessmentCompletion(input: AssessmentCompletionInput!): AssessmentCompletionEvent @aws_iam
+  publishDesignProgress(input: DesignProgressInput!): DesignProgressEvent @aws_iam @aws_cognito_user_pools
+}
+
+type Subscription {
+  onAgentStatusUpdate(projectId: ID!): AgentStatus
+    @aws_subscribe(mutations: ["updateAgentStatus"])
+  onConversationMessage(projectId: ID!): ConversationMessage
+    @aws_subscribe(mutations: ["sendMessage", "publishConversationMessage"])
+  onProjectProgress(projectId: ID!): ProjectProgress
+    @aws_subscribe(mutations: ["updateProjectProgress"])
+  onAssessmentCompleted(projectId: ID!): AssessmentCompletionEvent
+    @aws_subscribe(mutations: ["publishAssessmentCompletion"])
+  onDesignProgress(projectId: ID!): DesignProgressEvent
+    @aws_subscribe(mutations: ["publishDesignProgress"])
+    @aws_iam @aws_cognito_user_pools
+}
+
+type Project {
+  id: ID!
+  name: String!
+  status: ProjectStatus!
+  currentModule: Module!
+  progress: ProjectProgress!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  owner: String!
+  description: String
+  requirements: String
+  agents: [AgentStatus]
+}
+
+type Module {
+  id: String!
+  name: String!
+  description: String!
+  status: ModuleStatus!
+  agentId: String!
+}
+
+type ProjectProgress {
+  overall: Float!
+  assessment: Float!
+  design: Float!
+  planning: Float!
+  implementation: Float!
+  currentPhase: String!
+  estimatedCompletion: AWSDateTime
+}
+
+type AgentStatus {
+  agentId: String!
+  projectId: ID!
+  status: AgentStatusEnum!
+  currentTask: String
+  progress: Float
+  lastUpdate: AWSDateTime!
+  metadata: AWSJSON
+  errorMessage: String
+}
+
+type ConversationMessage @aws_iam @aws_cognito_user_pools {
+  id: ID!
+  projectId: ID!
+  agentId: String!
+  message: String!
+  messageType: MessageType!
+  timestamp: AWSDateTime!
+  metadata: AWSJSON
+  correlationId: String
+}
+
+type DocumentUploadResult {
+  success: Boolean!
+  documentId: String
+  url: String
+  message: String
+}
+
+type DocumentUploadUrl {
+  uploadUrl: String!
+  documentKey: String!
+  expiresIn: Int!
+}
+
+type AgentConfig {
+  agentId: String!
+  config: AWSJSON!
+  state: AgentState!
+  categories: [String]
+  createdAt: AWSDateTime
+  updatedAt: AWSDateTime
+}
+
+type DeleteAgentConfigResult {
+  success: Boolean!
+  message: String
+}
+
+type ToolConfig {
+  toolId: String!
+  config: AWSJSON!
+  state: ToolState!
+  categories: [String]
+  createdAt: AWSDateTime
+  updatedAt: AWSDateTime
+}
+
+type DeleteToolConfigResult {
+  success: Boolean!
+  message: String
+}
+
+type AgentCreationResponse {
+  success: Boolean!
+  requestId: String!
+  message: String
+}
+
+type TaskSubmissionResponse {
+  success: Boolean!
+  orchestrationId: String!
+  message: String
+}
+
+type User {
+  userId: String!
+  email: String!
+  name: String!
+  givenName: String!
+  familyName: String!
+  role: String
+  organization: String
+  status: String!
+  createdAt: AWSDateTime!
+  enabled: Boolean!
+}
+
+type UserManagementResponse {
+  success: Boolean!
+  message: String
+}
+
+type Organization {
+  orgId: String!
+  name: String!
+  description: String
+  createdAt: AWSDateTime
+}
+
+type AssessmentCompletionEvent {
+  projectId: ID!
+  allDimensionsComplete: Boolean!
+  timestamp: AWSDateTime!
+}
+
+type DesignProgressEvent @aws_iam @aws_cognito_user_pools {
+  projectId: ID!
+  sectionId: String!
+  completionPercentage: Float!
+  timestamp: AWSDateTime!
+}
+
+type AssessmentDimensionProgress {
+  dimension: String!
+  completionPercentage: Float!
+  isComplete: Boolean!
+}
+
+type ReportDownloadUrl {
+  url: String!
+  expiresIn: Int!
+}
+
+type ProjectConnection {
+  items: [Project]
+  nextToken: String
+}
+
+input ProjectFilter {
+  status: ProjectStatus
+  owner: String
+  createdAfter: AWSDateTime
+  createdBefore: AWSDateTime
+}
+
+input CreateProjectInput {
+  name: String!
+  description: String
+  requirements: String
+}
+
+input UpdateProjectInput {
+  name: String
+  description: String
+  requirements: String
+  status: ProjectStatus
+}
+
+input AgentStatusInput {
+  status: AgentStatusEnum!
+  currentTask: String
+  progress: Float
+  metadata: AWSJSON
+  errorMessage: String
+}
+
+input ProjectProgressInput {
+  overall: Float
+  assessment: Float
+  design: Float
+  planning: Float
+  implementation: Float
+  currentPhase: String
+  estimatedCompletion: AWSDateTime
+}
+
+input ConversationMessageInput {
+  agentId: String!
+  message: String!
+  messageType: MessageType!
+  metadata: AWSJSON
+  correlationId: String
+}
+
+input PublishMessageInput {
+  id: ID!
+  projectId: ID!
+  agentId: String!
+  message: String!
+  messageType: MessageType!
+  timestamp: AWSDateTime!
+  metadata: AWSJSON
+  correlationId: String
+}
+
+input S3Object {
+  bucket: String!
+  key: String!
+  region: String!
+}
+
+input GenerateUploadUrlInput {
+  projectId: ID!
+  fileName: String!
+  fileType: String!
+  fileSize: Int!
+}
+
+input CreateAgentConfigInput {
+  agentId: String!
+  config: AWSJSON!
+  state: AgentState
+  categories: [String]
+}
+
+input UpdateAgentConfigInput {
+  agentId: String!
+  config: AWSJSON
+  state: AgentState
+  categories: [String]
+}
+
+input CreateToolConfigInput {
+  toolId: String!
+  config: AWSJSON!
+  state: ToolState
+  categories: [String]
+}
+
+input UpdateToolConfigInput {
+  toolId: String!
+  config: AWSJSON
+  state: ToolState
+  categories: [String]
+}
+
+input CreateAgentRequestInput {
+  agentName: String!
+  taskDescription: String!
+  tools: [String]
+  integrations: [String]
+  dataStores: [String]
+}
+
+input SubmitTaskInput {
+  taskDetails: String!
+}
+
+input AssignUserRoleInput {
+  userId: String!
+  role: String!
+  organization: String
+}
+
+input AssessmentCompletionInput {
+  projectId: ID!
+  allDimensionsComplete: Boolean!
+  timestamp: AWSDateTime!
+}
+
+input DesignProgressInput {
+  projectId: ID!
+  sectionId: String!
+  completionPercentage: Float!
+  timestamp: AWSDateTime!
+}
+
+enum ProjectStatus {
+  CREATED
+  IN_PROGRESS
+  ASSESSMENT_COMPLETE
+  DESIGN_COMPLETE
+  PLANNING_COMPLETE
+  IMPLEMENTATION_READY
+  COMPLETED
+  ERROR
+}
+
+enum ModuleStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  ERROR
+}
+
+enum AgentStatusEnum {
+  IDLE
+  PROCESSING
+  WAITING_FOR_INPUT
+  COMPLETED
+  ERROR
+}
+
+enum MessageType {
+  USER_INPUT
+  AGENT_RESPONSE
+  SYSTEM_NOTIFICATION
+  PROGRESS_UPDATE
+}
+
+enum AgentState {
+  active
+  inactive
+  maintenance
+}
+
+enum ToolState {
+  active
+  inactive
+  maintenance
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+  subscription: Subscription
+}

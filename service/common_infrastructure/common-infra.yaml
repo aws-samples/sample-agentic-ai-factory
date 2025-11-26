@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Common infrastructure resources for Agentic AI Factory'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, staging, prod]
+    Description: Environment name for resource naming
+
+Resources:
+  # Shared Session Memory DynamoDB Table
+  SessionMemoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'agentic-ai-factory-session-memory-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: p_key
+          AttributeType: S
+        - AttributeName: s_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: p_key
+          KeyType: HASH
+        - AttributeName: s_key
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: agentic-ai-factory
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: session-memory
+
+  # Shared Session Data S3 Bucket
+  SessionBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'agentic-ai-factory-sessions-${Environment}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldSessions
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: Project
+          Value: agentic-ai-factory
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: session-data
+
+Outputs:
+  SessionMemoryTableName:
+    Description: Name of the session memory DynamoDB table
+    Value: !Ref SessionMemoryTable
+    Export:
+      Name: !Sub '${AWS::StackName}-SessionMemoryTableName'
+  
+  SessionMemoryTableArn:
+    Description: ARN of the session memory DynamoDB table
+    Value: !GetAtt SessionMemoryTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SessionMemoryTableArn'
+
+  SessionBucketName:
+    Description: Name of the session data S3 bucket
+    Value: !Ref SessionBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-SessionBucketName'

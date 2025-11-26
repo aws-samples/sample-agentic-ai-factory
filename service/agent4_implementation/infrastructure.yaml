@@ -1,0 +1,532 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Infrastructure for Agent 4 - Implementation Execution Agent'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['test', 'dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  ProjectName:
+    Type: String
+    Default: 'agentic-ai-factory'
+    Description: 'Project name for resource naming'
+
+Resources:
+  # DynamoDB Table for Implementation Tasks
+  ImplementationTasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-implementation-tasks-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: task_id
+          AttributeType: S
+        - AttributeName: session_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: task_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: session-index
+          KeySchema:
+            - AttributeName: session_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Agent
+          Value: agent4-implementation
+
+  # DynamoDB Table for Implementation Results
+  ImplementationResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-implementation-results-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: result_id
+          AttributeType: S
+        - AttributeName: task_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: result_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: task-index
+          KeySchema:
+            - AttributeName: task_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Agent
+          Value: agent4-implementation
+
+  # S3 Bucket for Implementation Artifacts
+  ImplementationArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-agent4-artifacts-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          - Id: ArchiveOldArtifacts
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Agent
+          Value: agent4-implementation
+
+  # S3 Bucket for Deployment Packages
+  DeploymentPackagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-agent4-deployments-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Agent
+          Value: agent4-implementation
+
+  # IAM Role for Agent 4
+  Agent4ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-agent4-execution-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - bedrock.amazonaws.com
+                - bedrock-agentcore.amazonaws.com
+                - lambda.amazonaws.com
+                - codebuild.amazonaws.com
+                - codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess
+      Policies:
+        - PolicyName: Agent4Permissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Bedrock permissions
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:GetFoundationModel
+                  - bedrock:ListFoundationModels
+                Resource: 
+                  - '*'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/au.anthropic.claude-sonnet-4-5-20250929-v1:0'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0'
+              
+              # DynamoDB permissions
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: 
+                  - !GetAtt ImplementationTasksTable.Arn
+                  - !Sub '${ImplementationTasksTable.Arn}/index/*'
+                  - !GetAtt ImplementationResultsTable.Arn
+                  - !Sub '${ImplementationResultsTable.Arn}/index/*'
+              
+              # S3 permissions
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource: 
+                  - !Sub '${ImplementationArtifactsBucket.Arn}/*'
+                  - !GetAtt ImplementationArtifactsBucket.Arn
+                  - !Sub '${DeploymentPackagesBucket.Arn}/*'
+                  - !GetAtt DeploymentPackagesBucket.Arn
+              
+              # CloudFormation permissions for infrastructure deployment
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:ValidateTemplate
+                Resource: '*'
+              
+              # Lambda permissions for application deployment
+              - Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:InvokeFunction
+                  - lambda:GetFunction
+                  - lambda:ListFunctions
+                  - lambda:DeleteFunction
+                Resource: '*'
+              
+              # API Gateway permissions
+              - Effect: Allow
+                Action:
+                  - apigateway:*
+                Resource: '*'
+              
+              # EventBridge permissions
+              - Effect: Allow
+                Action:
+                  - events:*
+                Resource: '*'
+              
+              # IAM permissions for role management
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PassRole
+                  - iam:GetRole
+                  - iam:ListRoles
+                  - iam:UpdateRole
+                Resource: '*'
+              
+              # CodeBuild permissions
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateProject
+                  - codebuild:UpdateProject
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - codebuild:BatchGetProjects
+                Resource: '*'
+              
+              # CodePipeline permissions
+              - Effect: Allow
+                Action:
+                  - codepipeline:CreatePipeline
+                  - codepipeline:UpdatePipeline
+                  - codepipeline:StartPipelineExecution
+                  - codepipeline:GetPipelineState
+                  - codepipeline:GetPipelineExecution
+                Resource: '*'
+              
+              # ECR permissions for AgentCore Runtime
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: '*'
+              
+              # CloudWatch permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+
+  # Lambda Function for API Integration
+  Agent4APIFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-agent4-api-${Environment}'
+      Runtime: python3.11
+      Handler: api_integration.lambda_handler
+      Role: !GetAtt Agent4ExecutionRole.Arn
+      Code:
+        ZipFile: |
+          # Placeholder code - will be replaced during deployment
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': 'Agent 4 API placeholder'}
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          PROJECT_NAME: !Ref ProjectName
+          TASKS_TABLE: !Ref ImplementationTasksTable
+          RESULTS_TABLE: !Ref ImplementationResultsTable
+          ARTIFACTS_BUCKET: !Ref ImplementationArtifactsBucket
+          DEPLOYMENTS_BUCKET: !Ref DeploymentPackagesBucket
+      Timeout: 600
+      MemorySize: 2048
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Agent
+          Value: agent4-implementation
+
+  # API Gateway for REST API
+  Agent4RestAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${ProjectName}-agent4-api-${Environment}'
+      Description: 'REST API for Agent 4 - Implementation Execution'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # API Gateway Resources and Methods
+  ImplementationResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Agent4RestAPI
+      ParentId: !GetAtt Agent4RestAPI.RootResourceId
+      PathPart: implementation
+
+  ExecuteResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Agent4RestAPI
+      ParentId: !Ref ImplementationResource
+      PathPart: execute
+
+  StatusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Agent4RestAPI
+      ParentId: !Ref ImplementationResource
+      PathPart: status
+
+  ArtifactsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Agent4RestAPI
+      ParentId: !Ref ImplementationResource
+      PathPart: artifacts
+
+  # POST method for executing implementation
+  ExecuteMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Agent4RestAPI
+      ResourceId: !Ref ExecuteResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Agent4APIFunction.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # GET method for status
+  StatusMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Agent4RestAPI
+      ResourceId: !Ref StatusResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Agent4APIFunction.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # GET method for artifacts
+  ArtifactsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Agent4RestAPI
+      ResourceId: !Ref ArtifactsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Agent4APIFunction.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Lambda permission for API Gateway
+  LambdaAPIPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Agent4APIFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:apigateway:${AWS::Region}::/restapis/${Agent4RestAPI}/stages/*/*'
+
+  # API Gateway Deployment
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ExecuteMethod
+      - StatusMethod
+      - ArtifactsMethod
+    Properties:
+      RestApiId: !Ref Agent4RestAPI
+      StageName: !Ref Environment
+
+  # CloudWatch Log Group for Agent
+  Agent4LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-agent4-${Environment}'
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # EventBridge Rule for Implementation Events
+  ImplementationEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-agent4-events-${Environment}'
+      Description: 'EventBridge rule for Agent 4 implementation events'
+      EventPattern:
+        source:
+          - 'agentic-ai-factory'
+        detail-type:
+          - 'Implementation Task Started'
+          - 'Implementation Task Completed'
+          - 'Implementation Task Failed'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt Agent4APIFunction.Arn
+          Id: 'Agent4EventTarget'
+
+  # Permission for EventBridge to invoke Lambda
+  EventBridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Agent4APIFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ImplementationEventRule.Arn
+
+Outputs:
+  APIEndpoint:
+    Description: 'API Gateway endpoint URL for Agent 4'
+    Value: !Sub 'https://${Agent4RestAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${ProjectName}-agent4-api-endpoint-${Environment}'
+
+  TasksTableName:
+    Description: 'DynamoDB table name for implementation tasks'
+    Value: !Ref ImplementationTasksTable
+    Export:
+      Name: !Sub '${ProjectName}-agent4-tasks-table-${Environment}'
+
+  ResultsTableName:
+    Description: 'DynamoDB table name for implementation results'
+    Value: !Ref ImplementationResultsTable
+    Export:
+      Name: !Sub '${ProjectName}-agent4-results-table-${Environment}'
+
+  ArtifactsBucketName:
+    Description: 'S3 bucket name for implementation artifacts'
+    Value: !Ref ImplementationArtifactsBucket
+    Export:
+      Name: !Sub '${ProjectName}-agent4-artifacts-bucket-${Environment}'
+
+  DeploymentsBucketName:
+    Description: 'S3 bucket name for deployment packages'
+    Value: !Ref DeploymentPackagesBucket
+    Export:
+      Name: !Sub '${ProjectName}-agent4-deployments-bucket-${Environment}'
+
+  ExecutionRoleArn:
+    Description: 'IAM role ARN for Agent 4 execution'
+    Value: !GetAtt Agent4ExecutionRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-agent4-execution-role-${Environment}'
+
+  Agent4Arn:
+    Description: 'Bedrock AgentCore ARN for Agent 4'
+    Value: !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:agent/agent4_implementation'
+    Export:
+      Name: !Sub '${ProjectName}-agent4-arn-${Environment}'

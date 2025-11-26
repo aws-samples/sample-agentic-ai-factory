@@ -1,0 +1,8 @@
+bedrock-agentcore
+strands-agents
+fastapi
+boto3
+pyyaml
+bedrock-agentcore-starter-toolkit
+strands-agents[otel]
+requests

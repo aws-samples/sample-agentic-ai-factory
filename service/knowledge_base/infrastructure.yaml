@@ -1,0 +1,555 @@
+# Author: sudarns@amazon.com
+# Date Modified: 2025-10-28 02:27:00
+# Version: 1.0
+# Purpose: Sets up Knowledge bases for Agentic Factory Agents using Bedrock KB with various sources. All kb is indexed in an AOSS vector database
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Agentic AI Factory Knowledge Bases: Web, compliance, SAP and other sources with opensearch vectordb'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, staging, prod]
+    Description: Environment name
+Resources:
+  # OpenSearch Serverless Collection
+  KnowledgeBaseCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn: KnowledgeBaseSecurityPolicy
+    Properties:
+      Name: !Sub 'agentic-ai-factory-kb-${Environment}'
+      Type: VECTORSEARCH
+      Description: Agentic AI Factory Vector collection for Bedrock Knowledge Bases
+
+  # OpenSearch Serverless Security Policy
+  KnowledgeBaseSecurityPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub 'agentic-ai-kb-sec-${Environment}'
+      Type: encryption
+      Policy: !Sub |
+        {
+          "Rules": [
+            {
+              "ResourceType": "collection",
+              "Resource": ["collection/agentic-ai-factory-kb-${Environment}"]
+            }
+          ],
+          "AWSOwnedKey": true
+        }
+
+  # OpenSearch Serverless Network Policy
+  KnowledgeBaseNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub 'agentic-ai-kb-net-${Environment}'
+      Type: network
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/agentic-ai-factory-kb-${Environment}"]
+              }
+            ],
+            "AllowFromPublic": true
+          }
+        ]
+
+  # IAM Role for Bedrock Knowledge Base
+  BedrockKnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'agentic-ai-factory-kb-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+      Policies:
+        - PolicyName: OpenSearchServerlessAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !GetAtt KnowledgeBaseCollection.Arn
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${KnowledgeBaseFilesBucket}"
+                  - !Sub "arn:aws:s3:::${KnowledgeBaseFilesBucket}/*"
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/bedrock/knowledge-base/*'
+
+  # OpenSearch Serverless Access Policy
+  KnowledgeBaseAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    DependsOn: CreateIndicesRole
+    Properties:
+      Name: !Sub 'agentic-ai-kb-access-${Environment}'
+      Type: data
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/agentic-ai-factory-kb-${Environment}"],
+                "Permission": [
+                  "aoss:*"        
+                ]
+              },
+              {
+                "ResourceType": "index",
+                "Resource": ["index/*/*"],
+                "Permission": [
+                  "aoss:*"
+                ]
+              }         
+            ],
+            "Principal": ["${BedrockKnowledgeBaseRole.Arn}", "${CreateIndicesRole.Arn}", "arn:aws:iam::${AWS::AccountId}:role/Administrator"]
+          }
+        ]
+
+  # Lambda function for creating vector indices
+  CreateIndicesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-create-indices"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import urllib3
+          import time
+          import hashlib
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      send_response(event, context, 'SUCCESS')
+                      return
+                  
+                  collection_endpoint = event['ResourceProperties']['CollectionEndpoint']
+                  region = event['ResourceProperties']['Region']
+                  
+                  index_mapping = {
+                      "settings": {
+                          "index": {
+                              "knn": True
+                          }
+                      },
+                      "mappings": {
+                          "properties": {
+                              "vector": {
+                                  "type": "knn_vector",
+                                  "dimension": 1024,
+                                  "method": {"name": "hnsw", "space_type": "l2", "engine": "faiss"}
+                              },
+                              "text": {"type": "text"},
+                              "metadata": {"type": "text"}
+                          }
+                      }
+                  }
+                  
+                  session = boto3.Session()
+                  credentials = session.get_credentials()
+                  http = urllib3.PoolManager()
+                  
+                  for index_name in ["file-sources-index", "integrations-index", "web-sources-index"]:
+                      # Retry logic for 403 errors
+                      for attempt in range(6):  # 6 attempts = 5 minutes total
+                          try:
+                              url = f"{collection_endpoint}/{index_name}"
+                              print(f"Creating index at: {url}")
+                              
+                              body_bytes = json.dumps(index_mapping).encode('utf-8')
+                              request = AWSRequest(method='PUT', url=url, data=body_bytes)
+                              request.headers['Content-Type'] = 'application/json'
+                              request.headers['x-amz-content-sha256'] = hashlib.sha256(body_bytes).hexdigest()
+                              
+                              SigV4Auth(credentials, 'aoss', region).add_auth(request)
+                              
+                              response = http.request('PUT', url, 
+                                                    headers=dict(request.headers),
+                                                    body=request.body)
+                              
+                              if response.status in [200, 201]:
+                                  print(f"Successfully created {index_name}")
+                                  break
+                              elif response.status == 403 and attempt < 5:
+                                  print(f"403 error for {index_name}, retrying in 60s (attempt {attempt+1}/6)")
+                                  time.sleep(60)
+                                  continue
+                              else:
+                                  raise Exception(f"Failed to create {index_name}: {response.data}")
+                          except Exception as e:
+                              if attempt < 5:
+                                  print(f"Error creating {index_name}, retrying: {str(e)}")
+                                  time.sleep(60)
+                                  continue
+                              else:
+                                  raise
+                  
+                  # Wait 60 seconds after all indices are created
+                  print(f"Waiting 60 seconds for Opensearch indexes to propogate...")
+                  time.sleep(60)
+                  
+                  send_response(event, context, 'SUCCESS')
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  send_response(event, context, 'FAILED', str(e))
+
+          def send_response(event, context, status, reason=None):
+              response_body = {
+                  'Status': status,
+                  'Reason': reason or f'See CloudWatch Log Stream: {context.log_stream_name}',
+                  'PhysicalResourceId': context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId']
+              }
+              
+              http = urllib3.PoolManager()
+              response = http.request('PUT', event['ResponseURL'], 
+                                    body=json.dumps(response_body),
+                                    headers={'Content-Type': 'application/json'})
+      Role: !GetAtt CreateIndicesRole.Arn
+      Timeout: 600
+
+  # IAM role for Lambda
+  CreateIndicesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: OpenSearchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - aoss:APIAccessAll
+                  - aoss:CreateIndex
+                  - aoss:UpdateIndex
+                  - aoss:DescribeIndex
+                Resource: !GetAtt KnowledgeBaseCollection.Arn
+              - Effect: Allow
+                Action: 
+                  - aoss:DashboardsAccessAll
+                Resource: "*"                
+              - Effect: Allow
+                Action: "aoss:*"
+                Resource: "*"
+
+  # Custom resource to create indices
+  CreateVectorIndices:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: 
+      - KnowledgeBaseCollection
+      - KnowledgeBaseAccessPolicy
+    Properties:
+      ServiceToken: !GetAtt CreateIndicesFunction.Arn
+      CollectionEndpoint: !GetAtt KnowledgeBaseCollection.CollectionEndpoint
+      Region: !Ref AWS::Region
+
+  # CloudWatch Log Group for Bedrock Knowledge Base
+  BedrockKnowledgeBaseLogGroup1:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/vendedlogs/bedrock/knowledge-base/APPLICATION_LOGS/${ComplianceKnowledgeBase}'
+      RetentionInDays: 30
+
+  BedrockKnowledgeBaseLogGroup2:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/vendedlogs/bedrock/knowledge-base/APPLICATION_LOGS/${IntegrationsKnowledgeBase}'
+      RetentionInDays: 30
+
+  BedrockKnowledgeBaseLogGroup3:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/vendedlogs/bedrock/knowledge-base/APPLICATION_LOGS/${FileSourcesKnowledgeBase}'
+      RetentionInDays: 30
+
+  # Bedrock Knowledge Base
+  ComplianceKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    DependsOn: 
+      - KnowledgeBaseAccessPolicy
+      - KnowledgeBaseCollection
+      - CreateVectorIndices
+    Properties:
+      Name: !Sub 'agentic-ai-factory-kb-compliance-${Environment}'
+      Description: Agentic Factory Knowledge Base for compliance and regulations from trusted sources
+      RoleArn: !GetAtt BedrockKnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt KnowledgeBaseCollection.Arn
+          VectorIndexName: web-sources-index
+          FieldMapping:
+            VectorField: vector
+            TextField: text
+            MetadataField: metadata
+
+  # Web Crawler Data Source
+  WebDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref ComplianceKnowledgeBase
+      Name: !Sub 'compliance-web-sources-${Environment}'
+      Description: Web crawler data sources for compliance content
+      DataSourceConfiguration:
+        Type: WEB
+        WebConfiguration:
+          CrawlerConfiguration:
+            CrawlerLimits:
+              RateLimit: 300
+            ExclusionFilters:
+              - ".*\\.pdf$"
+              - ".*\\.docx?$"
+          SourceConfiguration:
+            UrlConfiguration:
+              SeedUrls:
+                - Url: "https://d1.awsstatic.com/whitepapers/compliance/pci-dss-compliance-on-aws-v4-102023.pdf"
+                - Url: "https://d1.awsstatic.com/whitepapers/compliance/AICPA_SOC2_Compliance_Guide_on_AWS.pdf"
+                - Url: "https://d1.awsstatic.com/whitepapers/compliance/AWS_HIPAA_Compliance_Whitepaper.e06b4693c311012393670054b87689dc0fe8bc82.pdf"
+                - Url: "https://www.commerce.uwo.ca/pdf/PCI-DSS-v4_0.pdf"
+                - Url: "https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=OJ:L_202401689"
+                - Url: "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf"
+                - Url: "https://www.mas.gov.sg/-/media/mas-media-library/publications/monographs-or-information-paper/imd/2024/information-paper-on-ai-risk-management-final.pdf"
+
+  # Second Bedrock Knowledge Base for Integrations
+  IntegrationsKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    DependsOn: 
+      - KnowledgeBaseAccessPolicy
+      - KnowledgeBaseCollection
+      - CreateVectorIndices
+    Properties:
+      Name: !Sub 'agentic-ai-factory-kb-integrations-${Environment}'
+      Description: Agentic Factory Knowledge Base for 3P integrations documentation
+      RoleArn: !GetAtt BedrockKnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt KnowledgeBaseCollection.Arn
+          VectorIndexName: integrations-index
+          FieldMapping:
+            VectorField: vector
+            TextField: text
+            MetadataField: metadata
+
+  # Web Crawler Data Source for Integrations
+  IntegrationsWebDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref IntegrationsKnowledgeBase
+      Name: !Sub 'integrations-web-sources-${Environment}'
+      Description: Web crawler for integration documentation from GitHub
+      DataSourceConfiguration:
+        Type: WEB
+        WebConfiguration:
+          CrawlerConfiguration:
+            CrawlerLimits:
+              RateLimit: 300
+            ExclusionFilters:
+              - "^https?://.*\\.(jpg|jpeg|png|gif|zip|vscode)$"
+          SourceConfiguration:
+            UrlConfiguration:
+              SeedUrls:
+                - Url: "https://github.com/lemaiwo/btp-sap-odata-to-mcp-server"
+                - Url: "https://github.com/marianfoo/mcp-sap-docs"
+                - Url: "https://github.com/aws-samples/well-architected-iac-analyzer"
+
+  # S3 Bucket for Knowledge Base Files
+  KnowledgeBaseFilesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'agentic-ai-factory-kb-files-${Environment}-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # Third Bedrock Knowledge Base for File Sources
+  FileSourcesKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    DependsOn: 
+      - KnowledgeBaseAccessPolicy
+      - KnowledgeBaseCollection
+      - CreateVectorIndices
+    Properties:
+      Name: !Sub 'agentic-ai-factory-kb-file-sources-${Environment}'
+      Description: Agentic Factory Knowledge Base for file-based sources
+      RoleArn: !GetAtt BedrockKnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt KnowledgeBaseCollection.Arn
+          VectorIndexName: file-sources-index
+          FieldMapping:
+            VectorField: vector
+            TextField: text
+            MetadataField: metadata
+
+  # S3 Data Source for File Sources
+  FileSourcesS3DataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref FileSourcesKnowledgeBase
+      Name: !Sub 'file-sources-s3-${Environment}'
+      Description: S3 data source for file-based knowledge content
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !GetAtt KnowledgeBaseFilesBucket.Arn
+          InclusionPrefixes:
+            - kb-file-sources/
+
+Outputs:
+  ComplianceKnowledgeBaseId:
+    Description: 'Compliance Knowledge Base ID'
+    Value: !Ref ComplianceKnowledgeBase
+    Export:
+      Name: !Sub '${AWS::StackName}-ComplianceKnowledgeBaseId'
+
+  ComplianceKnowledgeBaseArn:
+    Description: 'Bedrock Knowledge Base ARN'
+    Value: !GetAtt ComplianceKnowledgeBase.KnowledgeBaseArn
+    Export:
+      Name: !Sub '${AWS::StackName}-ComplianceKnowledgeBaseArn'
+
+  OpenSearchCollectionEndpoint:
+    Description: 'OpenSearch Serverless Collection Endpoint for Vector indexes'
+    Value: !GetAtt KnowledgeBaseCollection.CollectionEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-CollectionEndpoint'
+
+  ComplianceVectorIndexName:
+    Description: 'Compliance Knowledge Base Vector Index Name'
+    Value: 'web-sources-index'
+    Export:
+      Name: !Sub '${AWS::StackName}-ComplianceVectorIndex'
+
+  IntegrationsVectorIndexName:
+    Description: 'Integrations Knowledge Base Vector Index Name'
+    Value: 'integrations-index'
+    Export:
+      Name: !Sub '${AWS::StackName}-IntegrationsVectorIndex'
+
+  FileSourcesVectorIndexName:
+    Description: 'File Sources Knowledge Base Vector Index Name'
+    Value: 'file-sources-index'
+    Export:
+      Name: !Sub '${AWS::StackName}-FileSourcesVectorIndex'
+
+  DataSourceId:
+    Description: 'Web Data Source ID'
+    Value: !Ref WebDataSource
+    Export:
+      Name: !Sub '${AWS::StackName}-DataSourceId'
+
+  IntegrationsKnowledgeBaseId:
+    Description: 'Integrations Knowledge Base ID'
+    Value: !Ref IntegrationsKnowledgeBase
+    Export:
+      Name: !Sub '${AWS::StackName}-IntegrationsKnowledgeBaseId'
+
+  IntegrationsKnowledgeBaseArn:
+    Description: 'Integrations Knowledge Base ARN'
+    Value: !GetAtt IntegrationsKnowledgeBase.KnowledgeBaseArn
+    Export:
+      Name: !Sub '${AWS::StackName}-IntegrationsKnowledgeBaseArn'
+
+  IntegrationsDataSourceId:
+    Description: 'Integrations Web Data Source ID'
+    Value: !Ref IntegrationsWebDataSource
+    Export:
+      Name: !Sub '${AWS::StackName}-IntegrationsDataSourceId'
+
+  KnowledgeBaseFilesBucketName:
+    Description: 'Knowledge Base Files S3 Bucket Name'
+    Value: !Ref KnowledgeBaseFilesBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-KnowledgeBaseFilesBucket'
+
+  FileSourcesKnowledgeBaseId:
+    Description: 'File Sources Knowledge Base ID'
+    Value: !Ref FileSourcesKnowledgeBase
+    Export:
+      Name: !Sub '${AWS::StackName}-FileSourcesKnowledgeBaseId'
+
+  FileSourcesKnowledgeBaseArn:
+    Description: 'File Sources Knowledge Base ARN'
+    Value: !GetAtt FileSourcesKnowledgeBase.KnowledgeBaseArn
+    Export:
+      Name: !Sub '${AWS::StackName}-FileSourcesKnowledgeBaseArn'
+
+  FileSourcesDataSourceId:
+    Description: 'File Sources S3 Data Source ID'
+    Value: !Ref FileSourcesS3DataSource
+    Export:
+      Name: !Sub '${AWS::StackName}-FileSourcesDataSourceId'
+
+  BedrockLogGroupName:
+    Description: 'Bedrock Knowledge Base CloudWatch Log Group Base Location'
+    Value: '/aws/vendedlogs/bedrock/knowledge-base/APPLICATION_LOGS/'
+    Export:
+      Name: !Sub '${AWS::StackName}-BedrockLogGroup'
+

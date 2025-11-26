@@ -1,0 +1,348 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Infrastructure for Agent 3 - Planning & Strategy Agent'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['test', 'dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  ProjectName:
+    Type: String
+    Default: 'agentic-ai-factory'
+    Description: 'Project name for resource naming'
+
+Resources:
+  # DynamoDB Table for Planning Sessions
+  PlanningSessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-planning-sessions-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: user-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Agent
+          Value: agent3-planning
+
+  # S3 Bucket for Document Storage
+  DocumentStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-agent3-documents-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Agent
+          Value: agent3-planning
+
+  # IAM Role for Agent 1
+  Agent3ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-agent3-execution-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - bedrock.amazonaws.com
+                - bedrock-agentcore.amazonaws.com
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: Agent3Permissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Bedrock permissions
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:GetFoundationModel
+                  - bedrock:ListFoundationModels
+                Resource: 
+                  - '*'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/au.anthropic.claude-sonnet-4-5-20250929-v1:0'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0'
+              
+              # DynamoDB permissions
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: 
+                  - !GetAtt PlanningSessionsTable.Arn
+                  - !Sub '${PlanningSessionsTable.Arn}/index/*'
+              
+              # S3 permissions
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${DocumentStorageBucket.Arn}/*'
+              
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt DocumentStorageBucket.Arn
+              
+              # Comprehend permissions
+              - Effect: Allow
+                Action:
+                  - comprehend:DetectSentiment
+                  - comprehend:DetectEntities
+                  - comprehend:DetectKeyPhrases
+                Resource: '*'
+              
+              # ECR permissions for AgentCore Runtime
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: '*'
+              
+              # CloudWatch Logs permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  # Lambda Function for API Integration
+  Agent3APIFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-agent3-api-${Environment}'
+      Runtime: python3.11
+      Handler: api_integration.lambda_handler
+      Role: !GetAtt Agent3ExecutionRole.Arn
+      Code:
+        ZipFile: |
+          # Placeholder code - will be replaced during deployment
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': 'Agent 1 API placeholder'}
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          PROJECT_NAME: !Ref ProjectName
+          SESSIONS_TABLE: !Ref PlanningSessionsTable
+          DOCUMENTS_BUCKET: !Ref DocumentStorageBucket
+      Timeout: 300
+      MemorySize: 1024
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Agent
+          Value: agent3-planning
+
+  # API Gateway for REST API
+  Agent3RestAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${ProjectName}-agent3-api-${Environment}'
+      Description: 'REST API for Agent 1 - Planning & Evaluation'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # API Gateway Resources and Methods
+  PlanningResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Agent3RestAPI
+      ParentId: !GetAtt Agent3RestAPI.RootResourceId
+      PathPart: planning
+
+  StartResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Agent3RestAPI
+      ParentId: !Ref PlanningResource
+      PathPart: start
+
+  InvokeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Agent3RestAPI
+      ParentId: !Ref PlanningResource
+      PathPart: invoke
+
+  ProgressResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Agent3RestAPI
+      ParentId: !Ref PlanningResource
+      PathPart: progress
+
+  # POST method for starting planning
+  StartMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Agent3RestAPI
+      ResourceId: !Ref StartResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Agent3APIFunction.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # POST method for invoking planning
+  InvokeMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Agent3RestAPI
+      ResourceId: !Ref InvokeResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Agent3APIFunction.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # GET method for progress
+  ProgressMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Agent3RestAPI
+      ResourceId: !Ref ProgressResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Agent3APIFunction.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Lambda permission for API Gateway
+  LambdaAPIPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Agent3APIFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:apigateway:${AWS::Region}::/restapis/${Agent3RestAPI}/stages/*/*'
+
+  # API Gateway Deployment
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - StartMethod
+      - InvokeMethod
+      - ProgressMethod
+    Properties:
+      RestApiId: !Ref Agent3RestAPI
+      StageName: !Ref Environment
+
+  # CloudWatch Log Group for Agent
+  Agent3LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-agent3-${Environment}'
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+Outputs:
+  APIEndpoint:
+    Description: 'API Gateway endpoint URL for Agent 1'
+    Value: !Sub 'https://${Agent3RestAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${ProjectName}-agent3-api-endpoint-${Environment}'
+
+  SessionsTableName:
+    Description: 'DynamoDB table name for planning sessions'
+    Value: !Ref PlanningSessionsTable
+    Export:
+      Name: !Sub '${ProjectName}-agent3-sessions-table-${Environment}'
+
+  DocumentsBucketName:
+    Description: 'S3 bucket name for document storage'
+    Value: !Ref DocumentStorageBucket
+    Export:
+      Name: !Sub '${ProjectName}-agent3-documents-bucket-${Environment}'
+
+  ExecutionRoleArn:
+    Description: 'IAM role ARN for Agent 3 execution'
+    Value: !GetAtt Agent3ExecutionRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-agent3-execution-role-${Environment}'
+
+  Agent3Arn:
+    Description: 'Bedrock AgentCore ARN for Agent 3'
+    Value: !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:agent/agent3_planning'
+    Export:
+      Name: !Sub '${ProjectName}-agent3-arn-${Environment}'

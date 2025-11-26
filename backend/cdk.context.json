@@ -1,0 +1,4 @@
+{
+  "ssm:account=941384789627:parameterName=/agentic-ai-factory/gateway/confluence-schema-uri-dev:region=ap-southeast-2": "s3://amazonbedrockagentcore-built-sampleschemas455e0815-yigvs4je21kx/confluence-open-api.json",
+  "ssm:account=941384789627:parameterName=/agentic-ai-factory/gateway/confluence-credential-provider-dev:region=ap-southeast-2": "arn:aws:bedrock-agentcore:ap-southeast-2:941384789627:token-vault/default/apikeycredentialprovider/confluence-dev"
+}
