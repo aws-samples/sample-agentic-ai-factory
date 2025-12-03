@@ -38,7 +38,7 @@ export const handler = async (event: EventBridgeEvent<'design.progress.updated',
       projectId,
       sectionId,
       completionPercentage,
-      timestamp: event.detail.timestamp
+      timestamp: new Date(event.detail.timestamp).toISOString()
     }
   };
   const body = JSON.stringify({ query: mutation, variables });

@@ -20,20 +20,37 @@ export function IntakeRequests() {
 
   useEffect(() => {
     loadProjects();
-  }, []);
+    
+    // Poll for updates every 5 seconds when viewing the list (silent mode)
+    const interval = setInterval(() => {
+      if (subView === 'list') {
+        loadProjects(true);
+      }
+    }, 5000);
+    
+    return () => clearInterval(interval);
+  }, [subView]);
 
-  const loadProjects = async () => {
-    setLoading(true);
+  const loadProjects = async (silent = false) => {
+    if (!silent) {
+      setLoading(true);
+    }
     setError(null);
     
     try {
       const projectsList = await projectService.listProjects();
-      setProjects(projectsList);
+      // Only update if data actually changed
+      const hasChanged = JSON.stringify(projectsList) !== JSON.stringify(projects);
+      if (hasChanged) {
+        setProjects(projectsList);
+      }
     } catch (err: any) {
       console.error('Failed to load projects:', err);
       setError(err.message || 'Failed to load projects');
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -70,9 +87,15 @@ export function IntakeRequests() {
 
   const handleSelectPlan = (project: Project) => {
     setSelectedProject(project);
-
-    console.log('Plan phase clicked');
-    alert('Plan functionality coming soon!');
+    
+    // If assessment is complete but design is not, go to assessment page to generate report
+    if (project.progress?.assessment === 100 && project.progress?.design !== 100) {
+      setSubView('assessment');
+    }
+    // If both assessment and design are complete, go to dashboard
+    else if (project.progress?.assessment === 100 && project.progress?.design === 100) {
+      setSubView('dashboard');
+    }
   };
 
   const handleSelectImplement = (project: Project) => {

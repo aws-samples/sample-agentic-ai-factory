@@ -21,27 +21,20 @@ export interface ServicesStackProps extends cdk.StackProps {
   integrationsKnowledgeBaseId: string;
   fileSourcesKnowledgeBaseId: string;
   environment: string;
+  agentEventBus: events.EventBus;
+  projectsTable: dynamodb.Table;
+  conversationsTable: dynamodb.Table;
+  documentBucket: s3.Bucket;
 }
 
 export class ServicesStack extends cdk.Stack {
-  public readonly conversationsTable: dynamodb.Table;
   public readonly sessionMemoryTable: dynamodb.Table;
   public readonly sessionBucket: s3.Bucket;
-  public readonly documentBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props: ServicesStackProps) {
       super(scope, id, props);
-  
-      this.conversationsTable = new dynamodb.Table(this, 'ConversationsTable', {
-        tableName: `agentic-ai-factory-conversations-${props.environment}`,
-        partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
-        sortKey: { name: 'timestamp', type: dynamodb.AttributeType.STRING },
-        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-        pointInTimeRecovery: true,
-      });
 
-      // Common Infrastructure - Session Memory
+      // Session Memory Table
       this.sessionMemoryTable = new dynamodb.Table(this, 'SessionMemoryTable', {
         tableName: `agentic-ai-factory-session-memory-${props.environment}`,
         partitionKey: { name: 'p_key', type: dynamodb.AttributeType.STRING },
@@ -52,9 +45,9 @@ export class ServicesStack extends cdk.Stack {
         timeToLiveAttribute: 'ttl',
       });
 
-      // Common Infrastructure - Session Data Bucket
+      // Session Data Bucket
       this.sessionBucket = new s3.Bucket(this, 'SessionBucket', {
-        bucketName: `agentic-ai-factory-sessions-${props.environment}`,
+        bucketName: `agentic-ai-factory-sessions-${props.environment}-${this.account}-${this.region}`,
         versioned: true,
         encryption: s3.BucketEncryption.S3_MANAGED,
         blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -346,85 +339,12 @@ export class ServicesStack extends cdk.Stack {
         ],
       }));
 
-      // Optional: Confluence Integration
-      // Only create if SSM parameters exist
-      try {
-        const confluenceSchemaUri = ssm.StringParameter.valueFromLookup(
-          this,
-          `/agentic-ai-factory/gateway/confluence-schema-uri-${props.environment}`
-        );
-
-        const confluenceCredentialProviderArn = ssm.StringParameter.valueFromLookup(
-          this,
-          `/agentic-ai-factory/gateway/confluence-credential-provider-${props.environment}`
-        );
-
-        // Only create Confluence target if parameters are not dummy values
-        if (confluenceSchemaUri && !confluenceSchemaUri.includes('dummy-value') &&
-            confluenceCredentialProviderArn && !confluenceCredentialProviderArn.includes('dummy-value')) {
-          
-          const confluenceTarget = new bedrockagentcore.CfnGatewayTarget(this, 'ConfluenceTarget', {
-            name: 'confluence',
-            gatewayIdentifier: gateway.attrGatewayIdentifier,
-            targetConfiguration: {
-              mcp: {
-                openApiSchema: {
-                  s3: {
-                    uri: confluenceSchemaUri,
-                  },
-                },
-              },
-            },
-            credentialProviderConfigurations: [
-              {
-                credentialProviderType: 'API_KEY',
-                credentialProvider: {
-                  apiKeyCredentialProvider: {
-                    providerArn: confluenceCredentialProviderArn,
-                    credentialLocation: 'HEADER',
-                  },
-                },
-              },
-            ],
-          });
-
-          new cdk.CfnOutput(this, 'ConfluenceIntegrationStatus', {
-            value: 'Enabled',
-            description: 'Confluence integration is configured',
-          });
-        } else {
-          new cdk.CfnOutput(this, 'ConfluenceIntegrationStatus', {
-            value: 'Disabled - SSM parameters not found',
-            description: 'Confluence integration skipped (optional)',
-          });
-        }
-      } catch (error) {
-        // Parameters don't exist - skip Confluence integration
-        new cdk.CfnOutput(this, 'ConfluenceIntegrationStatus', {
-          value: 'Disabled - SSM parameters not configured',
-          description: 'Confluence integration skipped (optional)',
-        });
-      }
-
-      // Agent 1 - Document Upload Bucket
-      this.documentBucket = new s3.Bucket(this, 'DocumentBucket', {
-        bucketName: `agentic-ai-factory-documents-${props.environment}`,
-        versioned: true,
-        encryption: s3.BucketEncryption.S3_MANAGED,
-        blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-        autoDeleteObjects: true,
-        cors: [
-          {
-            allowedHeaders: ['*'],
-            allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.POST],
-            allowedOrigins: ['*'],
-            maxAge: 3000,
-          },
-        ],
+      // Optional: Confluence Integration - Disabled for now
+      // To enable: Create SSM parameters as described in CONFLUENCE_SETUP.md
+      new cdk.CfnOutput(this, 'ConfluenceIntegrationStatus', {
+        value: 'Disabled - Not configured',
+        description: 'Confluence integration skipped (optional)',
       });
-
-
 
       // Agent 1 - Runtime
       const agent1Runtime = new agentcore.Runtime(this, 'Agent1Runtime', {
@@ -435,7 +355,7 @@ export class ServicesStack extends cdk.Stack {
         description: 'Agent 1 - Document Review & Information Gathering',
         environmentVariables: {
           AWS_REGION: cdk.Stack.of(this).region,
-          DOCUMENT_BUCKET: this.documentBucket.bucketName,
+          DOCUMENT_BUCKET: props.documentBucket.bucketName,
           SESSION_BUCKET: this.sessionBucket.bucketName,
           SESSION_MEMORY_TABLE: this.sessionMemoryTable.tableName,
           EVENT_BUS_NAME: `agentic-ai-factory-agents-${props.environment}`,
@@ -449,7 +369,7 @@ export class ServicesStack extends cdk.Stack {
       });
 
       // Grant permissions to Agent 1
-      this.documentBucket.grantReadWrite(agent1Runtime);
+      props.documentBucket.grantReadWrite(agent1Runtime);
       this.sessionBucket.grantReadWrite(agent1Runtime);
       this.sessionMemoryTable.grantReadWriteData(agent1Runtime);
       gatewaySecret.grantRead(agent1Runtime);
@@ -464,8 +384,8 @@ export class ServicesStack extends cdk.Stack {
           's3:GetBucketLocation',
         ],
         resources: [
-          this.documentBucket.bucketArn,
-          `${this.documentBucket.bucketArn}/*`,
+          props.documentBucket.bucketArn,
+          `${props.documentBucket.bucketArn}/*`,
           this.sessionBucket.bucketArn,
           `${this.sessionBucket.bucketArn}/*`,
         ],
@@ -504,8 +424,8 @@ export class ServicesStack extends cdk.Stack {
           AWS_REGION: cdk.Stack.of(this).region,
           SESSION_BUCKET: this.sessionBucket.bucketName,
           SESSION_MEMORY_TABLE: this.sessionMemoryTable.tableName,
-          EVENT_BUS_NAME: `agentic-ai-factory-agents-${props.environment}`,
-          PROJECTS_TABLE_NAME: `agentic-ai-factory-projects-${props.environment}`,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          PROJECTS_TABLE_NAME: props.projectsTable.tableName,
         },
       });
 
@@ -522,7 +442,7 @@ export class ServicesStack extends cdk.Stack {
           'dynamodb:UpdateItem',
         ],
         resources: [
-          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/agentic-ai-factory-projects-${props.environment}`,
+          props.projectsTable.tableArn,
         ],
       }));
 
@@ -536,14 +456,9 @@ export class ServicesStack extends cdk.Stack {
         resources: ['*'],
       }));
 
-      // Reference EventBridge event bus and grant permissions to agents
-      const agentEventBus = events.EventBus.fromEventBusName(
-        this,
-        'AgentEventBusRef',
-        `agentic-ai-factory-agents-${props.environment}`
-      );
-      agentEventBus.grantPutEventsTo(agent1Runtime);
-      agentEventBus.grantPutEventsTo(agent2Runtime);
+      // Grant permissions to agents
+      props.agentEventBus.grantPutEventsTo(agent1Runtime);
+      props.agentEventBus.grantPutEventsTo(agent2Runtime);
 
       // HLD PDF Generator Lambda Container
       const pdfGeneratorRepo = new ecr.Repository(this, 'PdfGeneratorRepo', {
@@ -582,13 +497,13 @@ export class ServicesStack extends cdk.Stack {
         handler: 'lambda_handler.handler',
         code: lambda.Code.fromAsset(path.join(__dirname, '../../../service/hld_pdf_notifier')),
         environment: {
-          EVENT_BUS_NAME: agentEventBus.eventBusName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
         },
         description: 'Publishes EventBridge event when HLD PDF is created',
       });
 
       // Grant EventBridge permissions
-      agentEventBus.grantPutEventsTo(pdfCreatedNotifier);
+      props.agentEventBus.grantPutEventsTo(pdfCreatedNotifier);
 
       // Add S3 event notification for PDF creation
       this.sessionBucket.addEventNotification(
@@ -637,26 +552,9 @@ export class ServicesStack extends cdk.Stack {
         value: agent2Runtime.agentRuntimeArn,
       });
 
-      new cdk.CfnOutput(this, 'SessionMemoryTableName', {
-        value: this.sessionMemoryTable.tableName,
-      });
 
-      new cdk.CfnOutput(this, 'SessionMemoryTableArn', {
-        value: this.sessionMemoryTable.tableArn,
-      });
 
-      new cdk.CfnOutput(this, 'SessionBucketName', {
-        value: this.sessionBucket.bucketName,
-      });
 
-      new cdk.CfnOutput(this, 'SessionBucketArn', {
-        value: this.sessionBucket.bucketArn,
-      });
-
-      new cdk.CfnOutput(this, 'DocumentBucketName', {
-        value: this.documentBucket.bucketName,
-        exportName: `${this.stackName}-DocumentBucketName`,
-      });
 
       new cdk.CfnOutput(this, 'Agent1RuntimeArn', {
         value: agent1Runtime.agentRuntimeArn,
@@ -706,6 +604,22 @@ export class ServicesStack extends cdk.Stack {
       new cdk.CfnOutput(this, 'GatewayArn', {
         value: gateway.attrGatewayArn,
         description: 'AgentCore Gateway ARN',
+      });
+
+      // Export session table and bucket names for BackendStack resolvers
+      new ssm.StringParameter(this, 'SessionMemoryTableNameParam', {
+        parameterName: `/agentic-ai-factory/session-memory-table-${props.environment}`,
+        stringValue: this.sessionMemoryTable.tableName,
+      });
+
+      new ssm.StringParameter(this, 'SessionMemoryTableArnParam', {
+        parameterName: `/agentic-ai-factory/session-memory-table-arn-${props.environment}`,
+        stringValue: this.sessionMemoryTable.tableArn,
+      });
+
+      new ssm.StringParameter(this, 'SessionBucketNameParam', {
+        parameterName: `/agentic-ai-factory/session-bucket-${props.environment}`,
+        stringValue: this.sessionBucket.bucketName,
       });
   }
 }

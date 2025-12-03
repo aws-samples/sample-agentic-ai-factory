@@ -46,6 +46,7 @@ export class ArbiterStack extends cdk.Stack {
       environment: {
         ORCHESTRATION_TABLE: this.orchestrationTable.tableName,
         COMPLETION_BUS_NAME: props.agentEventBus.eventBusName,
+        EVENT_BUS_NAME: props.agentEventBus.eventBusName,
         WORKER_STATE_TABLE: workerStateTable.tableName,
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
       },
@@ -87,16 +88,26 @@ export class ArbiterStack extends cdk.Stack {
     completionRule.addTarget(new targets.LambdaFunction(supervisorLambda));
 
     const code_bucket = new Bucket(this, 'CodeBucket', {
-      bucketName: `agentic-ai-factory-code-${props.environment}`,
+      bucketName: `agentic-ai-factory-code-${props.environment}-${cdk.Stack.of(this).account}-${cdk.Stack.of(this).region}`,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+    });
+
+    // Dead letter queue for failed worker messages
+    const workerAgentDLQ = new Queue(this, `workerAgentDLQ`, {
+      queueName: `agentic-ai-factory-worker-agent-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
     });
 
     const workerAgentQueue = new Queue(this, `workerAgentQueue`, {
       queueName: `agentic-ai-factory-worker-agent-queue-${props.environment}`,
       visibilityTimeout: cdk.Duration.minutes(15),
       retentionPeriod: cdk.Duration.days(7),
+      deadLetterQueue: {
+        queue: workerAgentDLQ,
+        maxReceiveCount: 3, // Retry 3 times before sending to DLQ
+      },
     });
 
     const workerAgentWrapperLambda = new PythonFunction(this, 'WorkerAgentWrapper', {
@@ -123,7 +134,10 @@ export class ArbiterStack extends cdk.Stack {
     props.agentConfigTable.grantReadData(workerAgentWrapperLambda);
     code_bucket.grantRead(workerAgentWrapperLambda);
 
-    workerAgentWrapperLambda.addEventSource(new SqsEventSource(workerAgentQueue));
+    workerAgentWrapperLambda.addEventSource(new SqsEventSource(workerAgentQueue, {
+      batchSize: 1, // Process one message at a time
+      reportBatchItemFailures: true, // Enable partial batch responses
+    }));
     
     const toolsConfigTable = new dynamodb.Table(this, 'ToolsConfigTable', {
       tableName: `agentic-ai-factory-tools-${props.environment}`,

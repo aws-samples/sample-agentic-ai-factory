@@ -24,7 +24,7 @@ def load_config_from_dynamodb(agent_name: str):
     print(response)
     return response['Item']
 
-def post_task_complete(response, agent_use_id, tool_name, orchestration_id):
+def post_task_complete(response, agent_use_id, agent_name, orchestration_id):
     client = boto3.client('events')
     
     COMPLETION_BUS_NAME = os.environ.get('COMPLETION_BUS_NAME')
@@ -57,7 +57,7 @@ def process_event(event, context):
     agent_name = event['node']
 
     agent = load_config_from_dynamodb(agent_name)
-    config = tool['config']
+    config = agent['config']
 
     if isinstance(config, str):
         config = json.loads(config)
@@ -84,9 +84,21 @@ def process_event(event, context):
 
 def lambda_handler(event, context):
     print(f"processing event {event}")
+    batch_item_failures = []
+    
     for record in event['Records']:
-        message_body = json.loads(record['body'])
-        process_event(message_body, context)
+        try:
+            message_body = json.loads(record['body'])
+            print(f"Processing message: {record['messageId']}")
+            process_event(message_body, context)
+            print(f"Successfully processed message: {record['messageId']}")
+        except Exception as e:
+            print(f"Error processing message {record['messageId']}: {e}")
+            # Add to batch failures so this message will be retried
+            batch_item_failures.append({"itemIdentifier": record['messageId']})
+    
+    # Return batch item failures for partial batch response
+    return {"batchItemFailures": batch_item_failures}
 
 if __name__ == "__main__":
     lambda_handler(

@@ -7,12 +7,11 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as path from 'path';
 import { Construct } from "constructs";
 
 interface BackendStackProps extends cdk.StackProps {
-  conversationsTable: dynamodb.Table;
-  documentBucket: any; // s3.Bucket
   environment: string;
 }
 
@@ -20,11 +19,62 @@ export class BackendStack extends cdk.Stack {
   public readonly appSyncApi: appsync.GraphqlApi;
   public readonly userPool: cognito.UserPool;
   public readonly userPoolClient: cognito.UserPoolClient;
-  public readonly agentEventBus: events.EventBus;
   public readonly agentConfigTable: dynamodb.Table;
+  public readonly agentEventBus: events.EventBus;
+  public readonly projectsTable: dynamodb.Table;
+  public readonly conversationsTable: dynamodb.Table;
+  public readonly documentBucket: any;
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props);
+
+    // EventBridge for agent coordination
+    this.agentEventBus = new events.EventBus(this, "AgentEventBus", {
+      eventBusName: `agentic-ai-factory-agents-${props.environment}`,
+    });
+
+    // Projects Table
+    this.projectsTable = new dynamodb.Table(this, "ProjectsTable", {
+      tableName: `agentic-ai-factory-projects-${props.environment}`,
+      partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+    });
+
+    this.projectsTable.addGlobalSecondaryIndex({
+      indexName: 'OrganizationIndex',
+      partitionKey: { name: 'organization', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    this.conversationsTable = new dynamodb.Table(this, 'ConversationsTable', {
+      tableName: `agentic-ai-factory-conversations-${props.environment}`,
+      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'timestamp', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+    });
+
+    this.documentBucket = new cdk.aws_s3.Bucket(this, 'DocumentBucket', {
+      bucketName: `agentic-ai-factory-documents-${props.environment}-${this.account}-${this.region}`,
+      versioned: true,
+      encryption: cdk.aws_s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: cdk.aws_s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      cors: [
+        {
+          allowedHeaders: ['*'],
+          allowedMethods: [cdk.aws_s3.HttpMethods.GET, cdk.aws_s3.HttpMethods.PUT, cdk.aws_s3.HttpMethods.POST],
+          allowedOrigins: ['*'],
+          maxAge: 3000,
+        },
+      ],
+    });
 
     // DynamoDB Tables
      const organisationTable = new dynamodb.Table(this, "OrganisationTable", {
@@ -35,22 +85,7 @@ export class BackendStack extends cdk.Stack {
       pointInTimeRecovery: true,
     });
 
-    const projectsTable = new dynamodb.Table(this, "ProjectsTable", {
-      tableName: `agentic-ai-factory-projects-${props.environment}`,
-      partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecovery: true,
-      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
-    });
 
-    // Add GSI for querying projects by organization
-    projectsTable.addGlobalSecondaryIndex({
-      indexName: 'OrganizationIndex',
-      partitionKey: { name: 'organization', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
-    });
 
     const agentStatusTable = new dynamodb.Table(this, "AgentStatusTable", {
       tableName: `agentic-ai-factory-agent-status-${props.environment}`,
@@ -177,10 +212,7 @@ export class BackendStack extends cdk.Stack {
       idTokenValidity: cdk.Duration.hours(1),
     });
 
-    // EventBridge for agent coordination
-    this.agentEventBus = new events.EventBus(this, "AgentEventBus", {
-      eventBusName: `agentic-ai-factory-agents-${props.environment}`,
-    });
+
 
     // Lambda functions for resolvers
     const projectResolverFunction = new lambda.Function(
@@ -191,8 +223,8 @@ export class BackendStack extends cdk.Stack {
         handler: "project-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
-          PROJECTS_TABLE: projectsTable.tableName,
-          CONVERSATIONS_TABLE: props.conversationsTable.tableName,
+          PROJECTS_TABLE: this.projectsTable.tableName,
+          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
           AGENT_STATUS_TABLE: agentStatusTable.tableName,
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
           USER_POOL_ID: this.userPool.userPoolId,
@@ -219,8 +251,8 @@ export class BackendStack extends cdk.Stack {
         handler: "conversation-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
-          PROJECTS_TABLE: projectsTable.tableName,
-          CONVERSATIONS_TABLE: props.conversationsTable.tableName,
+          PROJECTS_TABLE: this.projectsTable.tableName,
+          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
           AGENT_STATUS_TABLE: agentStatusTable.tableName,
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
         },
@@ -237,8 +269,8 @@ export class BackendStack extends cdk.Stack {
         handler: "agent-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
-          PROJECTS_TABLE: projectsTable.tableName,
-          CONVERSATIONS_TABLE: props.conversationsTable.tableName,
+          PROJECTS_TABLE: this.projectsTable.tableName,
+          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
           AGENT_STATUS_TABLE: agentStatusTable.tableName,
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
         },
@@ -255,7 +287,7 @@ export class BackendStack extends cdk.Stack {
         handler: "document-upload-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
-          DOCUMENT_BUCKET: props.documentBucket.bucketName,
+          DOCUMENT_BUCKET: this.documentBucket.bucketName,
         },
         timeout: cdk.Duration.seconds(30),
         logRetention: logs.RetentionDays.ONE_WEEK,
@@ -308,19 +340,19 @@ export class BackendStack extends cdk.Stack {
     );
 
     // Grant permissions to Lambda functions
-    projectsTable.grantReadWriteData(projectResolverFunction);
-    props.conversationsTable.grantReadWriteData(projectResolverFunction);
+    this.projectsTable.grantReadWriteData(projectResolverFunction);
+    this.conversationsTable.grantReadWriteData(projectResolverFunction);
     agentStatusTable.grantReadWriteData(projectResolverFunction);
 
-    props.conversationsTable.grantReadWriteData(conversationResolverFunction);
+    this.conversationsTable.grantReadWriteData(conversationResolverFunction);
     agentStatusTable.grantReadWriteData(conversationResolverFunction);
-    projectsTable.grantReadData(conversationResolverFunction);
+    this.projectsTable.grantReadData(conversationResolverFunction);
 
     agentStatusTable.grantReadWriteData(agentResolverFunction);
-    projectsTable.grantReadData(agentResolverFunction);
+    this.projectsTable.grantReadData(agentResolverFunction);
 
     // Grant S3 permissions for document upload
-    props.documentBucket.grantPut(documentUploadResolverFunction);
+    this.documentBucket.grantPut(documentUploadResolverFunction);
 
     // Grant permissions for agent config
     this.agentConfigTable.grantReadWriteData(agentConfigResolverFunction);
@@ -527,8 +559,8 @@ export class BackendStack extends cdk.Stack {
         handler: "agent-message-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
-          PROJECTS_TABLE: projectsTable.tableName,
-          CONVERSATIONS_TABLE: props.conversationsTable.tableName,
+          PROJECTS_TABLE: this.projectsTable.tableName,
+          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
           AGENT_STATUS_TABLE: agentStatusTable.tableName,
           APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
           ENVIRONMENT: props.environment,
@@ -563,7 +595,7 @@ export class BackendStack extends cdk.Stack {
     );
 
     // Grant DynamoDB permissions for storing responses
-    props.conversationsTable.grantReadWriteData(agentMessageHandlerFunction);
+    this.conversationsTable.grantReadWriteData(agentMessageHandlerFunction);
     agentStatusTable.grantReadWriteData(agentMessageHandlerFunction);
 
     // Grant AppSync permissions to trigger mutations
@@ -609,14 +641,14 @@ export class BackendStack extends cdk.Stack {
         handler: 'project-progress-updater.handler',
         code: lambda.Code.fromAsset('dist/lambda'),
         environment: {
-          PROJECTS_TABLE: projectsTable.tableName,
+          PROJECTS_TABLE: this.projectsTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logRetention: logs.RetentionDays.ONE_WEEK,
       }
     );
 
-    projectsTable.grantReadWriteData(projectProgressUpdater);
+    this.projectsTable.grantReadWriteData(projectProgressUpdater);
 
     // Assessment Completion Notifier Lambda
     const assessmentCompletionNotifier = new lambda.Function(
@@ -698,6 +730,68 @@ export class BackendStack extends cdk.Stack {
       })
     );
 
+    // Chatter Publisher Lambda - publishes all EventBridge messages to AppSync
+    const chatterPublisherFunction = new lambda.Function(
+      this,
+      "ChatterPublisherFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        handler: "chatter-publisher.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logRetention: logs.RetentionDays.ONE_WEEK,
+      }
+    );
+
+    // Grant AppSync permissions to chatter publisher
+    chatterPublisherFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["appsync:GraphQL"],
+        resources: [
+          `${this.appSyncApi.arn}/types/Mutation/fields/publishChatter`,
+        ],
+      })
+    );
+
+    // Chatter Resolver Lambda
+    const chatterResolverFunction = new lambda.Function(
+      this,
+      "ChatterResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        handler: "chatter-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(30),
+        logRetention: logs.RetentionDays.ONE_WEEK,
+      }
+    );
+
+    // EventBridge rule for ALL agent chatter - captures all messages on the bus
+    const chatterRule = new events.Rule(
+      this,
+      'ChatterRule',
+      {
+        eventBus: this.agentEventBus,
+        ruleName: `agentic-ai-factory-chatter-${props.environment}`,
+        description: 'Captures all agent communication for real-time display',
+        // Match all events on this bus by not specifying a pattern
+        eventPattern: {
+          source: [ { prefix: ''} ] as any[]
+        },
+      }
+    );
+
+    chatterRule.addTarget(
+      new targets.LambdaFunction(chatterPublisherFunction, {
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.hours(2),
+      })
+    );
+
     // EventBridge rule for progress updates
     const progressUpdateRule = new events.Rule(
       this,
@@ -723,11 +817,11 @@ export class BackendStack extends cdk.Stack {
     // Data sources
     const projectsDataSource = this.appSyncApi.addDynamoDbDataSource(
       "ProjectsDataSource",
-      projectsTable
+      this.projectsTable
     );
     const conversationsDataSource = this.appSyncApi.addDynamoDbDataSource(
       "ConversationsDataSource",
-      props.conversationsTable
+      this.conversationsTable
     );
     const agentStatusDataSource = this.appSyncApi.addDynamoDbDataSource(
       "AgentStatusDataSource",
@@ -768,6 +862,10 @@ export class BackendStack extends cdk.Stack {
     const userManagementLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "UserManagementLambdaDataSource",
       userManagementResolverFunction
+    );
+    const chatterLambdaDataSource = this.appSyncApi.addLambdaDataSource(
+      "ChatterLambdaDataSource",
+      chatterResolverFunction
     );
 
     // Query resolvers
@@ -992,6 +1090,14 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
+    // Chatter Resolver
+    chatterLambdaDataSource.createResolver("PublishChatterResolver", {
+      typeName: "Mutation",
+      fieldName: "publishChatter",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
     // Assessment Completion Resolver
     const assessmentCompletionResolverFunction = new lambda.Function(
       this,
@@ -1018,6 +1124,9 @@ export class BackendStack extends cdk.Stack {
     });
 
     // Assessment Progress Resolver
+    const sessionMemoryTableName = `agentic-ai-factory-session-memory-${props.environment}`;
+    const sessionMemoryTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/agentic-ai-factory-session-memory-${props.environment}`;
+
     const assessmentProgressResolverFunction = new lambda.Function(
       this,
       "AssessmentProgressResolverFunction",
@@ -1026,7 +1135,7 @@ export class BackendStack extends cdk.Stack {
         handler: "assessment-progress-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
-          SESSION_MEMORY_TABLE: `agentic-ai-factory-session-memory-${props.environment}`,
+          SESSION_MEMORY_TABLE: sessionMemoryTableName,
         },
         timeout: cdk.Duration.seconds(30),
         logRetention: logs.RetentionDays.ONE_WEEK,
@@ -1036,10 +1145,8 @@ export class BackendStack extends cdk.Stack {
     assessmentProgressResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['dynamodb:GetItem'],
-        resources: [
-          `arn:aws:dynamodb:${this.region}:${this.account}:table/agentic-ai-factory-session-memory-${props.environment}`,
-        ],
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [sessionMemoryTableArn],
       })
     );
 
@@ -1054,6 +1161,8 @@ export class BackendStack extends cdk.Stack {
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
+
+
 
     // Design Progress Resolver
     const designProgressResolverFunction = new lambda.Function(
@@ -1081,6 +1190,8 @@ export class BackendStack extends cdk.Stack {
     });
 
     // Report Download URL Generator
+    const sessionBucketName = `agentic-ai-factory-sessions-${props.environment}-${this.account}-${this.region}`;
+
     const generateReportUrlFunction = new lambda.Function(
       this,
       "GenerateReportUrlFunction",
@@ -1089,7 +1200,8 @@ export class BackendStack extends cdk.Stack {
         handler: "generate-report-url.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
-          SESSION_BUCKET: `agentic-ai-factory-sessions-${props.environment}`,
+          SESSION_BUCKET: sessionBucketName,
+          PROJECTS_TABLE: this.projectsTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logRetention: logs.RetentionDays.ONE_WEEK,
@@ -1101,11 +1213,12 @@ export class BackendStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['s3:GetObject', 's3:ListBucket'],
         resources: [
-          `arn:aws:s3:::agentic-ai-factory-sessions-${props.environment}`,
-          `arn:aws:s3:::agentic-ai-factory-sessions-${props.environment}/*`,
+          `arn:aws:s3:::${sessionBucketName}/*`,
+          `arn:aws:s3:::${sessionBucketName}`
         ],
       })
     );
+    this.projectsTable.grantReadData(generateReportUrlFunction);
 
     const generateReportUrlDataSource = this.appSyncApi.addLambdaDataSource(
       "GenerateReportUrlDataSource",
@@ -1120,6 +1233,7 @@ export class BackendStack extends cdk.Stack {
     });
 
     // Subscription resolvers (handled by AppSync automatically with proper schema)
+
 
     // Outputs
     new cdk.CfnOutput(this, "GraphQLApiUrl", {
@@ -1142,11 +1256,7 @@ export class BackendStack extends cdk.Stack {
       description: "Cognito User Pool Client ID",
     });
 
-    new cdk.CfnOutput(this, "EventBusName", {
-      value: this.agentEventBus.eventBusName,
-      description: "EventBridge Event Bus Name",
-      exportName: `${this.stackName}-EventBusName`,
-    });
+
 
     // Export outputs for cross-stack references
     new cdk.CfnOutput(this, "GraphQLApiUrlExport", {
@@ -1167,6 +1277,12 @@ export class BackendStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AgentMessageHandlerFunctionArn", {
       value: agentMessageHandlerFunction.functionArn,
       description: "Agent Message Handler Lambda Function ARN",
+    });
+
+    new cdk.CfnOutput(this, "EventBusName", {
+      value: this.agentEventBus.eventBusName,
+      description: "EventBridge Event Bus Name",
+      exportName: `${this.stackName}-EventBusName`,
     });
   }
 }

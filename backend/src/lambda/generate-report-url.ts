@@ -22,7 +22,7 @@ export const handler = async (event: any) => {
 
     const projectName = projectResult.Item?.name || 'Project';
     const sanitizedName = projectName.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const filename = `${sanitizedName}_Feasibility_Report.pdf`;
+    const filename = `${sanitizedName}-assessment-report.pdf`;
 
     const command = new GetObjectCommand({
       Bucket: SESSION_BUCKET,

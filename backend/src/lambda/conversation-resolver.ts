@@ -176,6 +176,28 @@ async function publishConversationMessage(event: AppSyncEvent) {
 }
 
 /**
+ * Send message to agent (simplified interface for direct calls)
+ */
+async function sendMessageToAgent(event: AppSyncEvent) {
+  const { projectId, agentId, message } = event.arguments as any;
+  
+  // Convert to sendMessage format
+  const convertedEvent = {
+    ...event,
+    arguments: {
+      projectId,
+      message: {
+        agentId,
+        message,
+        messageType: "USER_INPUT" as const,
+      },
+    },
+  };
+  
+  return await sendMessage(convertedEvent as AppSyncEvent);
+}
+
+/**
  * Lambda handler
  */
 export const handler = async (event: AppSyncEvent) => {
@@ -185,6 +207,8 @@ export const handler = async (event: AppSyncEvent) => {
     switch (event.info.fieldName) {
       case "sendMessage":
         return await sendMessage(event);
+      case "sendMessageToAgent":
+        return await sendMessageToAgent(event);
       case "getConversationHistory":
         return await getConversationHistory(event);
       case "publishConversationMessage":

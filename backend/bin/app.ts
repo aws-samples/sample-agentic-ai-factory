@@ -33,21 +33,23 @@ const knowledgeBaseStack = new KnowledgeBaseStack(app, `agentic-ai-factory-kb-${
   description: `Knowledge Bases for Agentic AI Factory - ${environment}`,
 });
 */
-// Services stack (depends on KB)
+// Backend infrastructure stack (deployed first)
+const backendStack = new BackendStack(app, `agentic-ai-factory-backend-${environment}`, {
+  ...stackProps,
+  description: `Backend infrastructure for Agentic AI Factory - ${environment}`,
+});
+
+// Services stack (depends on backend)
 const servicesStack = new ServicesStack(app, `agentic-ai-factory-services-${environment}`, {
   ...stackProps,
   description: `Agent services for Agentic AI Factory - ${environment}`,
   complianceKnowledgeBaseId: "",//knowledgeBaseStack.complianceKnowledgeBaseId,
   integrationsKnowledgeBaseId: "",//knowledgeBaseStack.integrationsKnowledgeBaseId,
   fileSourcesKnowledgeBaseId: "",//knowledgeBaseStack.fileSourcesKnowledgeBaseId,
-});
-
-// Backend infrastructure stack
-const backendStack = new BackendStack(app, `agentic-ai-factory-backend-${environment}`, {
-  ...stackProps,
-  description: `Backend infrastructure for Agentic AI Factory - ${environment}`,
-  conversationsTable: servicesStack.conversationsTable,
-  documentBucket: servicesStack.documentBucket,
+  agentEventBus: backendStack.agentEventBus,
+  projectsTable: backendStack.projectsTable,
+  conversationsTable: backendStack.conversationsTable,
+  documentBucket: backendStack.documentBucket,
 });
 
 const arbiterStack = new ArbiterStack(app, `agentic-ai-factory-arbiter-${environment}`, {
@@ -67,7 +69,7 @@ const frontendStack = new FrontendStack(app, `agentic-ai-factory-frontend-${envi
 });
 
 // Add dependencies
-//servicesStack.addDependency(knowledgeBaseStack);
-backendStack.addDependency(servicesStack);
-arbiterStack.addDependency(backendStack);
-frontendStack.addDependency(backendStack);
+//backendStack.addDependency(knowledgeBaseStack);
+servicesStack.addDependency(backendStack);
+arbiterStack.addDependency(servicesStack);
+frontendStack.addDependency(arbiterStack);

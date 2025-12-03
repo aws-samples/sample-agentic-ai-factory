@@ -1,14 +1,33 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Play, CheckCircle, AlertCircle } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { taskRunnerService } from '../services/taskRunnerService';
+import { AgentChatter } from './AgentChatter';
+import { useChatterSubscription } from '../hooks/useChatterSubscription';
+
+interface ChatterMessage {
+  id: string;
+  timestamp: string;
+  source: string;
+  detailType: string;
+  detail: any;
+}
 
 export function TaskRunner() {
   const [taskDetails, setTaskDetails] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<{ orchestrationId: string; message: string } | null>(null);
+  const [isSubscribed, setIsSubscribed] = useState(false);
+  const [chatterMessages, setChatterMessages] = useState<ChatterMessage[]>([]);
+
+  const handleChatterMessage = useCallback((message: ChatterMessage) => {
+    setChatterMessages((prev) => [...prev, message]);
+  }, []);
+
+  // Subscribe to chatter when a task is active
+  useChatterSubscription(handleChatterMessage, isSubscribed);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,6 +52,8 @@ export function TaskRunner() {
           message: response.message || 'Task submitted successfully',
         });
         setTaskDetails(''); // Clear the form
+        setIsSubscribed(true); // Start listening to chatter
+        setChatterMessages([]); // Clear previous messages
       } else {
         setError(response.message || 'Failed to submit task');
       }
@@ -165,25 +186,7 @@ export function TaskRunner() {
 
         {/* Right Column - Message Bus Display */}
         <div className="flex-1">
-          <Card className="bg-[#1a1f2e] border-[#2a3142] h-full">
-            <CardHeader>
-              <CardTitle className="text-white">Agent Communication</CardTitle>
-              <CardDescription className="text-[#9ca3af]">
-                Real-time messages between Supervisor and Worker agents
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="min-h-[500px] max-h-[700px] overflow-y-auto space-y-3">
-                {/* Placeholder for message bus */}
-                <div className="flex items-center justify-center h-[500px] text-[#6b7280]">
-                  <div className="text-center">
-                    <p className="text-sm">No active tasks</p>
-                    <p className="text-xs mt-1">Submit a task to see agent communication</p>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+          <AgentChatter isActive={isSubscribed} messages={chatterMessages} />
         </div>
       </div>
 

@@ -51,6 +51,7 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
   const [showGenerateReport, setShowGenerateReport] = useState(false);
   const [designComplete, setDesignComplete] = useState(projectService.isDesignComplete(project));
   const [generatingReport, setGeneratingReport] = useState(false);
+  const [designProgress, setDesignProgress] = useState(0);
   const [generationTimeout, setGenerationTimeout] = useState<NodeJS.Timeout | null>(null);
   const [showTimeoutWarning, setShowTimeoutWarning] = useState(false);
   const [assessmentProgress, setAssessmentProgress] = useState<Array<{
@@ -58,10 +59,10 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
     completionPercentage: number;
     isComplete: boolean;
   }>>([
-    { dimension: 'technical', completionPercentage: 0, isComplete: false },
-    { dimension: 'business', completionPercentage: 0, isComplete: false },
-    { dimension: 'commercial', completionPercentage: 0, isComplete: false },
-    { dimension: 'governance', completionPercentage: 0, isComplete: false },
+    { dimension: 'Technical', completionPercentage: 0, isComplete: false },
+    { dimension: 'Business', completionPercentage: 0, isComplete: false },
+    { dimension: 'Commercial', completionPercentage: 0, isComplete: false },
+    { dimension: 'Governance', completionPercentage: 0, isComplete: false },
   ]);
   const [sending, setSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -71,7 +72,25 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
   useEffect(() => {
     loadConversationHistory();
     loadAssessmentProgress();
+    checkDesignProgress();
   }, [project.id]);
+
+  const checkDesignProgress = async () => {
+    try {
+      const progress = await projectService.getProject(project.id);
+      const designPct = progress.progress?.design || 0;
+      setDesignProgress(designPct);
+      if (designPct > 0 && designPct < 100) {
+        setGeneratingReport(true);
+        setShowGenerateReport(false);
+      } else if (designPct === 100) {
+        setDesignComplete(true);
+        setGeneratingReport(false);
+      }
+    } catch (error) {
+      console.error('Error checking design progress:', error);
+    }
+  };
 
   // Subscribe to new messages
   useEffect(() => {
@@ -122,12 +141,17 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
     const unsubscribe = projectService.subscribeToDesignProgress(
       project.id,
       (data) => {
+        setDesignProgress(data.completionPercentage);
         if (generationTimeout) {
           clearTimeout(generationTimeout);
           setGenerationTimeout(null);
         }
-        if (data.completionPercentage === 100) {
+        if (data.completionPercentage > 0 && data.completionPercentage < 100) {
+          setGeneratingReport(true);
+          setShowGenerateReport(false);
+        } else if (data.completionPercentage === 100) {
           setDesignComplete(true);
+          setGeneratingReport(false);
         }
       }
     );
@@ -499,9 +523,9 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
           <Card className={`p-4 ${showTimeoutWarning ? 'bg-yellow-50 border-yellow-300' : 'bg-accent border-primary'}`}>
             <div className="space-y-3">
               <div>
-                <h4 className="text-foreground mb-1">Generating Feasibility Report</h4>
+                <h4 className="text-foreground mb-1">Generating Assessment Report</h4>
                 <p className="text-sm text-muted-foreground">
-                  Creating your feasibility assessment report...
+                  Creating your assessment report...
                 </p>
                 <p className="text-xs text-muted-foreground mt-1">
                   This may take several minutes. Agent is generating 30 sections.
@@ -526,7 +550,7 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
                   Your High Level Design report has been generated
                 </p>
               </div>
-              <Button onClick={onComplete}>Download Report</Button>
+              <Button onClick={onComplete}>Download Assessment Report</Button>
             </div>
           </Card>
         )}

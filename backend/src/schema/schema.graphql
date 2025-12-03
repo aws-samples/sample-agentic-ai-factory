@@ -53,6 +53,7 @@ type Mutation {
   removeUserRole(userId: String!, role: String!): UserManagementResponse
   publishAssessmentCompletion(input: AssessmentCompletionInput!): AssessmentCompletionEvent @aws_iam
   publishDesignProgress(input: DesignProgressInput!): DesignProgressEvent @aws_iam @aws_cognito_user_pools
+  publishChatter(input: AgentChatterInput!): AgentChatterMessage @aws_iam
 }
 
 type Subscription {
@@ -67,6 +68,9 @@ type Subscription {
   onDesignProgress(projectId: ID!): DesignProgressEvent
     @aws_subscribe(mutations: ["publishDesignProgress"])
     @aws_iam @aws_cognito_user_pools
+  onChatter: AgentChatterMessage
+    @aws_subscribe(mutations: ["publishChatter"])
+    @aws_cognito_user_pools
 }
 
 type Project {
@@ -225,6 +229,14 @@ type ReportDownloadUrl {
   expiresIn: Int!
 }
 
+type AgentChatterMessage @aws_iam @aws_cognito_user_pools {
+  id: ID!
+  timestamp: AWSDateTime!
+  source: String!
+  detailType: String!
+  detail: AWSJSON!
+}
+
 type ProjectConnection {
   items: [Project]
   nextToken: String
@@ -357,6 +369,14 @@ input DesignProgressInput {
   sectionId: String!
   completionPercentage: Float!
   timestamp: AWSDateTime!
+}
+
+input AgentChatterInput {
+  id: ID!
+  timestamp: AWSDateTime!
+  source: String!
+  detailType: String!
+  detail: AWSJSON!
 }
 
 enum ProjectStatus {

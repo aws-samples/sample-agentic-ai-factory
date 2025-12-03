@@ -26,22 +26,22 @@ SYSTEM_PROMPT = [{
 
 Your responsibilities:
 
-1. **Interpret & Plan**
+1. Interpret & Plan
    - Convert the user’s request into a clear objective and a structured execution plan.
    - If key details are missing, infer reasonable assumptions rather than asking the user.
    - Break work into parallel tasks whenever possible to optimise speed and efficiency.
 
-2. **Delegate & Orchestrate**
+2. Delegate & Orchestrate
    - Select the most appropriate agents for each task based on their capabilities.
    - Issue multiple agent calls in parallel when tasks are independent.
    - If an agent requires information that the user did not provide, you must generate or infer the required input yourself.
 
-3. **Monitor & Adapt**
+3. Monitor & Adapt
    - Track progress, validate outputs, and handle failure or ambiguity autonomously.
    - If a task returns unclear or incomplete results, refine the task or re-delegate.
    - Adjust the plan as new information emerges—tasks may be iterative or exploratory.
 
-4. **Quality & Completion**
+4. Quality & Completion**
    - Ensure final output meets the user’s intent and quality expectations.
    - Compile results, summarise outcomes, and deliver a coherent final response to the user.
 
@@ -161,6 +161,33 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
     print(f"Sending payload to {action_type} queue: {target}")
     print(f"Payload: {json.dumps(payload, default=str)}")
 
+    # Publish to EventBridge for chatter visibility
+    event_bus_name = os.environ.get('EVENT_BUS_NAME')
+    if event_bus_name:
+        try:
+            events_client = boto3.client('events')
+            events_client.put_events(
+                Entries=[
+                    {
+                        'Source': 'supervisor',
+                        'DetailType': 'chatter',
+                        'Detail': json.dumps({
+                            'action': 'agent_call',
+                            'agent_name': agent_name,
+                            'agent_input': agent_input,
+                            'orchestration_id': orchestration["orchestrationId"],
+                            'agent_use_id': agent_use_id,
+                            'target': target,
+                            'timestamp': time.time()
+                        }, default=str),
+                        'EventBusName': event_bus_name
+                    }
+                ]
+            )
+            print(f"Published supervisor message to EventBridge")
+        except Exception as e:
+            print(f"Error publishing to EventBridge: {e}")
+
     if action_type == "sqs":
         response = sqs.send_message(
             QueueUrl=target,
@@ -173,6 +200,7 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
 def invoke_agents_from_conversation(orchestration, agents_config):
     agent_ids = []
     output_message = orchestration["conversation"][-1]
+    text_response = None
 
     print(f'Invoking agents from message: {json.dumps(output_message, default=str)}')
     print(f'Message content: {output_message.get("content", [])}')
@@ -192,7 +220,8 @@ def invoke_agents_from_conversation(orchestration, agents_config):
             )
             print(f'Agent call result: {result}')
         elif 'text' in content:
-            print(f"Text response from model: {content['text']}")
+            text_response = content['text']
+            print(f"Text response from model: {text_response}")
 
     print(f'Total agents invoked: {len(agent_ids)}')
     print(f'Agent IDs: {agent_ids}')
@@ -203,6 +232,29 @@ def invoke_agents_from_conversation(orchestration, agents_config):
         print(f'Created workflow tracking with request_id: {request_id}')
     else:
         print('No agents were invoked - model may have responded with text only')
+        # Publish supervisor feedback to EventBridge for chatter visibility
+        event_bus_name = os.environ.get('EVENT_BUS_NAME')
+        if event_bus_name and text_response:
+            try:
+                events_client = boto3.client('events')
+                events_client.put_events(
+                    Entries=[
+                        {
+                            'Source': 'supervisor',
+                            'DetailType': 'supervisor.feedback',
+                            'Detail': json.dumps({
+                                'action': 'direct_response',
+                                'message': text_response,
+                                'orchestration_id': orchestration["orchestrationId"],
+                                'timestamp': time.time()
+                            }, default=str),
+                            'EventBusName': event_bus_name
+                        }
+                    ]
+                )
+                print(f"Published supervisor feedback to EventBridge")
+            except Exception as e:
+                print(f"Error publishing supervisor feedback to EventBridge: {e}")
 
 
 def update_orchestration_with_results(results, orchestration):
